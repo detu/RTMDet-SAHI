@@ -62,8 +62,30 @@ if(RTMDET_CUDA)
          "-DCUDA_TOOLKIT_ROOT_DIR=${_cuda_root}"
          "-DCUDA_NVCC_EXECUTABLE=${RTMDET_NVCC}"
          -DMNN_CUDA_NATIVE_ARCH=${RTMDET_CUDA_NATIVE_ARCH})
-    if(RTMDET_CUDA_ARCH)
-        list(APPEND _mnn_args "-DCUDA_ARCHS=${RTMDET_CUDA_ARCH}")
+    # GPU architecture: -DRTMDET_CUDA_ARCH, else ask nvidia-smi. Without it MNN
+    # runs its own detection and, if that fails, compiles for old GPUs
+    # (sm_60...), which CUDA 13 rejects ("Unsupported gpu architecture").
+    set(_cuda_arch "${RTMDET_CUDA_ARCH}")
+    if(NOT _cuda_arch)
+        find_program(RTMDET_NVIDIA_SMI nvidia-smi HINTS /usr/lib/wsl/lib /usr/bin)
+        if(RTMDET_NVIDIA_SMI)
+            execute_process(COMMAND "${RTMDET_NVIDIA_SMI}" --query-gpu=compute_cap --format=csv,noheader
+                            OUTPUT_VARIABLE _smi OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _smi_rc
+                            ERROR_QUIET)
+            if(_smi_rc EQUAL 0 AND _smi MATCHES "^([0-9]+\\.[0-9]+)")
+                set(_cuda_arch "${CMAKE_MATCH_1}")  # first GPU
+                message(STATUS "rtmdet_sahi: GPU compute capability ${_cuda_arch} (nvidia-smi)")
+            endif()
+        endif()
+    endif()
+    if(_cuda_arch)
+        list(APPEND _mnn_args "-DCUDA_ARCHS=${_cuda_arch}")
+    else()
+        execute_process(COMMAND "${RTMDET_NVCC}" --version OUTPUT_VARIABLE _nvcc_ver ERROR_QUIET)
+        if(_nvcc_ver MATCHES "release ([0-9]+)\\." AND CMAKE_MATCH_1 GREATER_EQUAL 13)
+            message(FATAL_ERROR "Cannot determine the GPU architecture (nvidia-smi not found or failed), and CUDA "
+                                "13 cannot build MNN's fallback list of old GPUs. Pass it, e.g. -DRTMDET_CUDA_ARCH=8.9")
+        endif()
     endif()
     message(STATUS "rtmdet_sahi: CUDA toolkit ${_cuda_root}")
 endif()

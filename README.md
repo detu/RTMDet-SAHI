@@ -68,7 +68,7 @@ Options:
 |---|---|---|
 | `RTMDET_CUDA` | `ON` | Build MNN's CUDA backend |
 | `RTMDET_VULKAN` | `OFF` | Build MNN's Vulkan backend |
-| `RTMDET_CUDA_ARCH` | *(detect)* | GPU compute capability to compile for, e.g. `8.9` (RTX 40xx / RTX Ada laptop GPUs), `8.6` (RTX 30xx), `12.0` (RTX 50xx) |
+| `RTMDET_CUDA_ARCH` | *(nvidia-smi)* | GPU compute capability to compile for, e.g. `8.9` (RTX 40xx / RTX Ada laptop GPUs), `8.6` (RTX 30xx), `12.0` (RTX 50xx) |
 | `RTMDET_CUDA_NATIVE_ARCH` | `ON` | Compile the CUDA kernels only for that one GPU (much faster build) |
 | `RTMDET_NVCC` | *(search)* | Path to `nvcc` |
 
@@ -144,8 +144,11 @@ automatically; it is also used when you pass a `.mnn` and the `.onnx` of the sam
 
 - **`nvcc not found`** – install the CUDA toolkit or pass `-DRTMDET_NVCC=/usr/local/cuda/bin/nvcc`; or build the
   Vulkan backend instead: `-DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON`.
-- **`nvcc fatal: Unsupported gpu architecture 'compute_60'`** (CUDA 13) – GPU detection failed during configure and
-  MNN fell back to a list with old GPUs. Pass your GPU's architecture: `-DRTMDET_CUDA_ARCH=8.9`.
+- **`Error generating file ... MNN_Cuda_Main_generated_*.cu.o`** – nvcc failed on one of MNN's CUDA files; the real
+  message is a few lines above it (rebuild with `cmake --build build -j 1 2>&1 | tee build.log` to see it clearly).
+  - `Unsupported gpu architecture 'compute_60'` (CUDA 13): the GPU architecture was not known while configuring.
+    It is now read from `nvidia-smi`; otherwise pass it, e.g. `-DRTMDET_CUDA_ARCH=8.9`, in a **new** build directory.
+  - `Killed` / `Error 137` / `cicc died`: out of memory; MNN's CUTLASS kernels are heavy to compile. Use `-j 1`.
 - **`Warning: cuda backend not available here; MNN uses CPU`** – the CUDA driver/GPU is not visible (check
   `nvidia-smi`). Under WSL2, `/usr/lib/wsl/lib` must be on the library path.
 - **Vulkan under WSL2** uses the Dozen (D3D12) driver, which works but is slower than CUDA.
