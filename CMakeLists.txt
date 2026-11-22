@@ -9,14 +9,32 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# GPU backend: CUDA or Vulkan -- one of them, not both (the CPU backend is
-# always built). Default CUDA; for Vulkan: -DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON.
-option(RTMDET_CUDA "Build MNN's CUDA backend (needs the CUDA toolkit / nvcc)" ON)
+# GPU backend -- exactly one of them, or none for a CPU-only build:
+#   RTMDET_CUDA   MNN with CUDA (NVIDIA)                       (default)
+#   RTMDET_VULKAN MNN with Vulkan (any GPU with a Vulkan driver)
+#   RTMDET_ROCM   ONNX Runtime with MIGraphX (AMD GPUs, ROCm)
+# The CPU backend is always there. Turning Vulkan or ROCm on switches the CUDA
+# default off; use a separate build directory for each.
 option(RTMDET_VULKAN "Build MNN's Vulkan backend (needs only the Vulkan loader at run time)" OFF)
-if(RTMDET_CUDA AND RTMDET_VULKAN)
-    message(FATAL_ERROR "RTMDET_CUDA and RTMDET_VULKAN cannot both be ON; choose one:\n"
-                        "  CUDA:   -DRTMDET_CUDA=ON  -DRTMDET_VULKAN=OFF\n"
+option(RTMDET_ROCM "Use ONNX Runtime with MIGraphX (AMD GPUs, ROCm) instead of MNN" OFF)
+if(RTMDET_VULKAN OR RTMDET_ROCM)
+    set(_cuda_default OFF)
+else()
+    set(_cuda_default ON)
+endif()
+option(RTMDET_CUDA "Build MNN's CUDA backend (needs the CUDA toolkit / nvcc)" ${_cuda_default})
+set(_n_gpu 0)
+foreach(_b RTMDET_CUDA RTMDET_VULKAN RTMDET_ROCM)
+    if(${_b})
+        math(EXPR _n_gpu "${_n_gpu} + 1")
+    endif()
+endforeach()
+if(_n_gpu GREATER 1)
+    message(FATAL_ERROR "Only one of RTMDET_CUDA, RTMDET_VULKAN and RTMDET_ROCM can be ON "
+                        "(now: CUDA ${RTMDET_CUDA}, Vulkan ${RTMDET_VULKAN}, ROCm ${RTMDET_ROCM}); choose one:\n"
+                        "  CUDA:   -DRTMDET_CUDA=ON\n"
                         "  Vulkan: -DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON\n"
+                        "  ROCm:   -DRTMDET_CUDA=OFF -DRTMDET_ROCM=ON\n"
                         "(use a separate build directory for each)")
 endif()
 option(RTMDET_CUDA_NATIVE_ARCH "Compile MNN's CUDA kernels only for the GPU in this machine" ON)
@@ -24,12 +42,17 @@ option(RTMDET_CUDA_NATIVE_ARCH "Compile MNN's CUDA kernels only for the GPU in t
 # Empty = detect the GPU in this machine while configuring.
 set(RTMDET_CUDA_ARCH "" CACHE STRING "CUDA compute capability to build for (empty = detect)")
 
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs dnn)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+
+if(RTMDET_ROCM)
+    include(cmake/onnxruntime_rocm.cmake)
+    return()
+endif()
+
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/MNN/CMakeLists.txt")
     message(FATAL_ERROR "MNN submodule missing: run 'git submodule update --init'")
 endif()
-
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs dnn)
-find_package(OpenMP REQUIRED COMPONENTS CXX)
 
 # ---- MNN (submodule), built as its own project: its CMake files expect to be
 #      the top-level project. Also builds MNNConvert, used to turn .onnx into .mnn.
@@ -116,7 +139,7 @@ set_target_properties(mnn_lib PROPERTIES
 add_dependencies(mnn_lib mnn_build)
 
 # ---- The program
-add_executable(rtmdet_sahi main.cpp mnn_detector.cpp onnx_meta.cpp)
+add_executable(rtmdet_sahi main.cpp region_detector.cpp mnn_runner.cpp onnx_meta.cpp)
 add_dependencies(rtmdet_sahi mnn_build)
 target_include_directories(rtmdet_sahi PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(rtmdet_sahi PRIVATE mnn_lib ${OpenCV_LIBS} OpenMP::OpenMP_CXX)

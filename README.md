@@ -1,12 +1,19 @@
 # RTMDet-SAHI
 
 C++ inference for [RTMDet](https://github.com/open-mmlab/mmdetection/tree/main/configs/rtmdet) object detection on
-large images with **SAHI** (Slicing Aided Hyper Inference), running on
-[MNN](https://github.com/alibaba/MNN) with a **CUDA** or **Vulkan** backend (chosen at build time), or on the CPU.
+large images with **SAHI** (Slicing Aided Hyper Inference). One GPU backend is chosen at build time:
+
+| Backend | Engine | GPUs |
+|---|---|---|
+| **CUDA** (default) | [MNN](https://github.com/alibaba/MNN) | NVIDIA |
+| **Vulkan** | MNN | any GPU with a Vulkan driver (NVIDIA, AMD, Intel) |
+| **ROCm** | [ONNX Runtime](https://onnxruntime.ai) + [MIGraphX](https://github.com/ROCm/AMDMIGraphX) | AMD GPUs supported by ROCm (e.g. Radeon RX 7000/9000, Ryzen AI Max) |
+
+Every build can also run on the CPU.
 
 You only need the model's **.onnx** file (e.g. exported with [LibreYOLO](https://github.com/LibreYOLO/libreyolo)).
-On first use it is converted to MNN's format (`model.mnn`, next to the `.onnx`) by MNN's own converter, which is
-built together with the program.
+MNN builds convert it on first use to MNN's format (`model.mnn`, next to the `.onnx`) with MNN's own converter,
+which is built together with the program; the ROCm build runs the `.onnx` directly.
 
 ## How it works
 
@@ -30,6 +37,7 @@ result is drawn and saved in the background.
 - CMake ≥ 3.18, a C++17 compiler, OpenCV (core, imgproc, imgcodecs, dnn), OpenMP
 - **CUDA backend:** the CUDA toolkit (`nvcc`). cuDNN is **not** needed.
 - **Vulkan backend:** nothing at build time (MNN ships its own Vulkan headers); a Vulkan driver at run time.
+- **ROCm backend:** ROCm, and ONNX Runtime with the MIGraphX execution provider — see [ROCm build](#rocm-build-amd-gpus).
 
 ```bash
 sudo apt install build-essential cmake libopencv-dev
@@ -50,13 +58,18 @@ cmake --build build -j 2
 cmake -B build-vulkan -DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON
 cmake --build build-vulkan -j 2
 
+# or ROCm (+ CPU), AMD GPUs -- see "ROCm build" below
+cmake -B build-rocm -DRTMDET_ROCM=ON -DONNXRUNTIME_INCLUDE_DIR=$HOME/onnxruntime-linux-x64-1.29.0/include
+cmake --build build-rocm -j 4
+
 # or CPU only
 cmake -B build-cpu -DRTMDET_CUDA=OFF
 ```
 
-Only **one** GPU backend can be built: `RTMDET_CUDA` and `RTMDET_VULKAN` cannot both be `ON` (CMake stops with an
-error). The CPU backend is always included, so `--backend cpu` works in every build. Use a separate build directory
-per backend. Builds are Release by default.
+Only **one** GPU backend can be built: at most one of `RTMDET_CUDA`, `RTMDET_VULKAN` and `RTMDET_ROCM` can be `ON`
+(CMake stops with an error otherwise; turning Vulkan or ROCm on switches the CUDA default off). The CPU backend is
+always included, so `--backend cpu` works in every build. Use a separate build directory per backend. Builds are
+Release by default.
 
 The MNN submodule (pinned at 3.6.2) is configured and built automatically, including `MNNConvert`. The first build
 takes a while; on machines with little RAM keep `-j` low (`-j 2`) — an out-of-memory kill shows up as
@@ -68,6 +81,7 @@ Options:
 |---|---|---|
 | `RTMDET_CUDA` | `ON` | Build MNN's CUDA backend |
 | `RTMDET_VULKAN` | `OFF` | Build MNN's Vulkan backend |
+| `RTMDET_ROCM` | `OFF` | ONNX Runtime + MIGraphX instead of MNN (no MNN submodule needed) |
 | `RTMDET_CUDA_ARCH` | *(nvidia-smi)* | GPU compute capability to compile for, e.g. `8.9` (RTX 40xx / RTX Ada laptop GPUs), `8.6` (RTX 30xx), `12.0` (RTX 50xx) |
 | `RTMDET_CUDA_NATIVE_ARCH` | `ON` | Compile the CUDA kernels only for that one GPU (much faster build) |
 | `RTMDET_NVCC` | *(search)* | Path to `nvcc` |
@@ -81,6 +95,49 @@ Example for a laptop RTX 1000 Ada under WSL2:
 cmake -B build -DRTMDET_CUDA_ARCH=8.9
 cmake --build build -j 2
 ```
+
+### ROCm build (AMD GPUs)
+
+Uses ONNX Runtime with AMD's MIGraphX execution provider, on native Linux (ROCm on WSL2 is limited). Written for
+Ubuntu 24.04 with a recent HWE kernel, e.g. a Ryzen AI Max+ 395 (Radeon 8060S, gfx1151); not yet tested on AMD
+hardware.
+
+1. **ROCm** – install it as AMD describes for your GPU
+   ([Ryzen APUs](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/),
+   [Radeon / Instinct](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/)), add yourself to the
+   `render` and `video` groups, and check that `rocminfo` lists the GPU (`gfx1151` for a Ryzen AI Max).
+2. **ONNX Runtime + MIGraphX** – follow AMD's
+   [Install ONNX Runtime for ROCm](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/inference/onnxruntime.html)
+   (a Python virtual environment with `onnxruntime` and the `onnxruntime-ep-migraphx` plugin, using the package
+   version AMD lists for your ROCm release), and run its check that the MIGraphX provider is available.
+3. **C++ headers** – the Python package has the library but not the headers. Download the official release archive
+   of the **same** version (`python -c "import onnxruntime; print(onnxruntime.__version__)"`):
+
+   ```bash
+   V=1.29.0   # your onnxruntime version
+   wget https://github.com/microsoft/onnxruntime/releases/download/v$V/onnxruntime-linux-x64-$V.tgz
+   tar xf onnxruntime-linux-x64-$V.tgz -C $HOME
+   ```
+4. **Build** with the virtual environment active (CMake asks its Python where the packages are):
+
+   ```bash
+   source ~/venv-ort/bin/activate          # your virtual environment
+   cmake -B build-rocm -DRTMDET_ROCM=ON -DONNXRUNTIME_INCLUDE_DIR=$HOME/onnxruntime-linux-x64-$V/include
+   cmake --build build-rocm -j 4
+   ./build-rocm/rtmdet_sahi rtmdet_s.onnx images/ -o out --csv dets.csv
+   ```
+
+   Configure prints the ONNX Runtime library and the MIGraphX plugin it found. Their folders (and pip's
+   `migraphx_libs`) are stored in the program, so no `LD_LIBRARY_PATH` is needed afterwards.
+
+Instead of the Python packages you can use an ONNX Runtime built from source with `--use_migraphx`:
+`-DONNXRUNTIME_ROOT=<install folder with include/ and lib/>`. Other options: `-DRTMDET_PYTHON=<python>`,
+`-DRTMDET_MIGRAPHX_EP=<plugin library>`.
+
+At start-up MIGraphX compiles the model for the GPU, which can take a while; every run then uses the same input
+shape (a full batch), so it is compiled only once per start. `auto` falls back to the CPU (with a warning) if
+MIGraphX is not available or cannot load the model; `--backend rocm` makes that an error instead.
+`--precision low` enables MIGraphX's fp16 mode.
 
 ## Usage
 
@@ -108,12 +165,14 @@ score) on a green background.
 | `--csv <file>` | | Write all detections (`image,class_id,class_name,score,x1,y1,x2,y2`) |
 | `-n, --names <file>` | model metadata | Class names, one per line: line 1 = class 0, line 2 = class 1, … |
 | `-r, --recursive` | | Scan directories recursively |
-| `-d, --backend` | `auto` | `cuda` or `vulkan` (whichever was built), or `cpu`; `auto` = the GPU backend if it works here, else CPU |
+| `-d, --backend` | `auto` | `cuda`, `vulkan` or `rocm` (whichever was built), or `cpu`; `auto` = the GPU backend if it works here, else CPU |
 | `--precision` | `normal` | `normal`, `high`, or `low` (fp16 where the backend supports it) |
 | `-b, --batch` | `8` | Regions per inference run (models exported with a fixed batch fall back to 1) |
 | `-t, --threads` | all cores | CPU backend threads and pre/post-processing threads |
-| `--fp16` | | Convert the `.onnx` with fp16 weights (`model.fp16.mnn`) |
-| `--reconvert` | | Convert again even if the `.mnn` is up to date |
+| `--fp16` | | MNN: convert the `.onnx` with fp16 weights (`model.fp16.mnn`) |
+| `--reconvert` | | MNN: convert again even if the `.mnn` is up to date |
+| `--ep-lib <path>` | from the build | ROCm: MIGraphX plugin EP library to use (also `$RTMDET_MIGRAPHX_EP`) |
+| `--ep-option k=v` | | ROCm: extra option for the MIGraphX plugin EP (repeatable) |
 | `-s, --size` | model | Model input size |
 | `--slice` | input size | Slice size |
 | `--overlap` | `0.2` | Slice overlap ratio |
@@ -154,9 +213,20 @@ automatically; it is also used when you pass a `.mnn` and the `.onnx` of the sam
 - **`Warning: cuda backend not available here; MNN uses CPU`** – the CUDA driver/GPU is not visible (check
   `nvidia-smi`). Under WSL2, `/usr/lib/wsl/lib` must be on the library path.
 - **Vulkan under WSL2** uses the Dozen (D3D12) driver, which works but is slower than CUDA.
+- **ROCm: `MIGraphX not available (...)`** – the message says what is missing:
+  - `libonnxruntime_providers_migraphx.so ... cannot open`: this ONNX Runtime has no built-in MIGraphX and no
+    plugin was found. Install `onnxruntime-ep-migraphx` (step 2) and configure again with that virtual environment
+    active, or pass `--ep-lib <path to the plugin library>`.
+  - a missing `libmigraphx*` / `libamdhip64` library: run once with
+    `LD_LIBRARY_PATH=<site-packages>/onnxruntime/capi:<site-packages>/migraphx_libs:/opt/rocm/lib` to confirm, then
+    reconfigure so the folders are stored in the program.
+  - `rocminfo` does not list the GPU: a ROCm / kernel driver problem (Ryzen AI Max needs a recent kernel), not
+    this program.
+- **ROCm: CMake says the ONNX Runtime headers are newer than the library** – download the headers of the library's
+  version (CMake prints it).
 - **Slower after a while on a laptop** – usually thermal/power throttling of the GPU; check with
   `nvidia-smi --query-gpu=temperature.gpu,clocks.sm,power.draw,clocks_throttle_reasons.active --format=csv -l 1`.
 
 ## License
 
-MNN (the `MNN/` submodule) is licensed under Apache-2.0.
+MNN (the `MNN/` submodule) is licensed under Apache-2.0; ONNX Runtime under MIT.

@@ -1,4 +1,5 @@
-// RTMDet + SAHI (Slicing Aided Hyper Inference) with MNN (CUDA, Vulkan or CPU).
+// RTMDet + SAHI (Slicing Aided Hyper Inference) with MNN (CUDA, Vulkan or CPU)
+// or, in a ROCm build, ONNX Runtime with MIGraphX (AMD GPUs) or CPU.
 //
 // The image is cut into overlapping slices at the model's input size (and,
 // with --full, the whole image is added as one more region). Every region is
@@ -7,8 +8,8 @@
 // the image, and duplicates and fragments across slice borders are merged as
 // in the SAHI library (greedy NMM with IOS).
 //
-// The model is given as .onnx (converted once to .mnn with MNN's converter,
-// next to the .onnx) or directly as .mnn.
+// MNN builds: the model is given as .onnx (converted once to .mnn with MNN's
+// converter, next to the .onnx) or directly as .mnn. ROCm builds run the .onnx.
 
 #include <algorithm>
 #include <cctype>
@@ -34,9 +35,13 @@
 #endif
 
 #include "detector.hpp"
-#include "mnn_detector.hpp"
+#include "region_detector.hpp"
 #include "onnx_meta.hpp"
 #include "region_ops.hpp"
+
+#ifndef RTMDET_WITH_ROCM
+#define RTMDET_WITH_ROCM 0
+#endif
 
 namespace fs = std::filesystem;
 
@@ -46,7 +51,7 @@ struct Options {
     std::string output;               // -o: output file (single image) or directory
     std::string csv_path;             // --csv: optional detections CSV
     std::string names_path;           // --names: class names, one per line (line 1 = class 0)
-    std::string backend = "auto";     // auto, cuda, vulkan, cpu
+    std::string backend = "auto";     // auto or one of available_backends()
     std::string precision = "normal"; // normal, high, low
     std::string preprocess = "auto";  // auto (metadata, else rtmdet), rtmdet, yolo
     std::string pad = "auto";         // auto (metadata, else per preprocessing), center, topleft
@@ -56,6 +61,8 @@ struct Options {
     bool full = false;                // also run on the whole (letterboxed) image
     bool fp16 = false;                // convert with fp16 weights
     bool reconvert = false;           // convert again even if the .mnn is up to date
+    std::string ep_lib;               // ROCm build: MIGraphX plugin EP library
+    std::vector<std::pair<std::string, std::string>> ep_options;  // ROCm build: --ep-option key=value
     int size = 0;                     // model input size (0 = metadata, input shape, else 640)
     int slice = 0;                    // slice size (0 = model input size)
     int batch = 8;                    // regions per run
@@ -80,10 +87,17 @@ static std::string join(const std::vector<std::string>& v, const char* sep) {
 
 static void print_usage(const char* prog) {
     std::cerr
+#if RTMDET_WITH_ROCM
+        << "Usage: " << prog << " <model.onnx> <image|dir> [<image|dir> ...] [options]\n"
+        << "\n"
+        << "Loads the RTMDet model once (ONNX Runtime) and runs SAHI on every image given.\n"
+        << "Directories are scanned for\n"
+#else
         << "Usage: " << prog << " <model.onnx|model.mnn> <image|dir> [<image|dir> ...] [options]\n"
         << "\n"
         << "Loads the RTMDet model once and runs SAHI on every image given. An .onnx model is\n"
         << "converted to .mnn (next to it) on first use. Directories are scanned for\n"
+#endif
         << ".jpg/.jpeg/.png/.bmp/.tif/.tiff/.webp files (sorted by name).\n"
         << "\n"
         << "  -o, --output <path>    single image: output file (default: output.jpg)\n"
@@ -94,13 +108,19 @@ static void print_usage(const char* prog) {
         << "                         (default: names stored in the ONNX model, if present)\n"
         << "  -r, --recursive        scan directories recursively\n"
         << "\n"
-        << "  -d, --backend <b>      " << join(mnn_available_backends(), ", ") << " or auto (default: auto =\n"
+        << "  -d, --backend <b>      " << join(available_backends(), ", ") << " or auto (default: auto =\n"
         << "                         the first available of those, in that order)\n"
         << "      --precision <p>    normal, high or low (fp16 where supported) (default: normal)\n"
         << "  -b, --batch <n>        regions per inference run (default: 8; 1 for fixed-batch models)\n"
         << "  -t, --threads <n>      CPU backend threads and preprocessing (default: all cores)\n"
+#if RTMDET_WITH_ROCM
+        << "      --ep-lib <path>    MIGraphX plugin EP library (AMD's onnxruntime-ep-migraphx), if your\n"
+        << "                         ONNX Runtime has no built-in MIGraphX (or set RTMDET_MIGRAPHX_EP)\n"
+        << "      --ep-option k=v    extra MIGraphX plugin EP option (repeatable)\n"
+#else
         << "      --fp16             convert the .onnx with fp16 weights (smaller, faster on GPU)\n"
         << "      --reconvert        convert the .onnx again even if the .mnn is up to date\n"
+#endif
         << "\n"
         << "  -s, --size <n>         model input size (default: from the model, else 640)\n"
         << "      --slice <n>        slice size (default: model input size)\n"
@@ -147,6 +167,14 @@ static bool parse_args(int argc, char** argv, Options& opt) {
         else if (a == "-t" || a == "--threads")   { if (!(v = next("--threads"))) return false; opt.threads = std::atoi(v); }
         else if (a == "--fp16")                   { opt.fp16 = true; }
         else if (a == "--reconvert")              { opt.reconvert = true; }
+        else if (a == "--ep-lib")                 { if (!(v = next("--ep-lib"))) return false; opt.ep_lib = v; }
+        else if (a == "--ep-option") {
+            if (!(v = next("--ep-option"))) return false;
+            const std::string kv = v;
+            const size_t eq = kv.find('=');
+            if (eq == std::string::npos || eq == 0) { std::cerr << "--ep-option expects key=value\n"; return false; }
+            opt.ep_options.emplace_back(kv.substr(0, eq), kv.substr(eq + 1));
+        }
         else if (a == "-s" || a == "--size")      { if (!(v = next("--size")))    return false; opt.size = std::atoi(v); }
         else if (a == "--slice")                  { if (!(v = next("--slice")))   return false; opt.slice = std::atoi(v); }
         else if (a == "--overlap")                { if (!(v = next("--overlap"))) return false; opt.overlap = std::strtof(v, nullptr); }
@@ -170,7 +198,7 @@ static bool parse_args(int argc, char** argv, Options& opt) {
         return false;
     };
     std::vector<const char*> backends = {"auto"};
-    static std::vector<std::string> avail = mnn_available_backends();
+    static std::vector<std::string> avail = available_backends();
     for (const auto& b : avail) backends.push_back(b.c_str());
     bool backend_ok = false;
     for (const char* b : backends) backend_ok |= opt.backend == b;
@@ -190,7 +218,7 @@ static bool parse_args(int argc, char** argv, Options& opt) {
     if (opt.slice < 0) { std::cerr << "--slice must be positive\n"; return false; }
     if (opt.overlap < 0.0f || opt.overlap >= 1.0f) { std::cerr << "--overlap must be in [0, 1)\n"; return false; }
     if (positional.size() < 2) {
-        if (!positional.empty()) std::cerr << "Expected <model.onnx|model.mnn> and at least one image or directory\n";
+        if (!positional.empty()) std::cerr << "Expected the model and at least one image or directory\n";
         return false;
     }
     opt.model = positional[0];
@@ -267,11 +295,6 @@ static std::string csv_escape(const std::string& s) {
 }
 
 // ---------------------------------------------------------------------------
-// SAHI
-// ---------------------------------------------------------------------------
-
-
-// ---------------------------------------------------------------------------
 // Model: .onnx -> .mnn conversion
 // ---------------------------------------------------------------------------
 
@@ -281,6 +304,7 @@ static std::string lower_ext(const fs::path& p) {
     return e;
 }
 
+#if !RTMDET_WITH_ROCM
 // MNN's converter: built next to this program by CMake (RTMDET_MNNCONVERT),
 // else next to the executable, else on PATH.
 static std::string find_converter(const char* argv0) {
@@ -334,6 +358,8 @@ static bool ensure_mnn(const fs::path& onnx, const Options& opt, const char* arg
     fs::remove(log, ec);
     return true;
 }
+
+#endif  // !RTMDET_WITH_ROCM
 
 // ---------------------------------------------------------------------------
 // SAHI
@@ -498,7 +524,7 @@ int main(int argc, char** argv) {
         names_source = opt.names_path;
     }
 
-    // ---- Model: .onnx (converted to .mnn on first use) or .mnn ----
+    // ---- Model: .onnx (MNN: converted to .mnn on first use) or .mnn ----
     std::error_code ec;
     const fs::path model_path(opt.model);
     if (!fs::is_regular_file(model_path, ec)) {
@@ -507,6 +533,15 @@ int main(int argc, char** argv) {
     }
     fs::path onnx_path, mnn_path;
     const std::string ext = lower_ext(model_path);
+#if RTMDET_WITH_ROCM
+    if (ext != ".onnx") {
+        std::cerr << "This build (ONNX Runtime) needs the .onnx model (got " << opt.model << ")\n";
+        return 1;
+    }
+    onnx_path = model_path;
+    mnn_path = model_path;  // the model file that runs
+    if (opt.fp16 || opt.reconvert) std::cerr << "Note: --fp16/--reconvert only apply to MNN builds (use --precision low)\n";
+#else
     if (ext == ".onnx") {
         onnx_path = model_path;
         if (!ensure_mnn(onnx_path, opt, argv[0], mnn_path)) return 1;
@@ -522,6 +557,7 @@ int main(int argc, char** argv) {
         std::cerr << "The model must be an .onnx or .mnn file (got " << opt.model << ")\n";
         return 1;
     }
+#endif
 
     // ONNX metadata (LibreYOLO writes names, imgsz, model_family, letterbox_pad)
     OnnxInfo onnx;
@@ -566,7 +602,7 @@ int main(int argc, char** argv) {
         else { pad = prep == "rtmdet" ? "topleft" : "center"; pad_source = "default"; }
     }
 
-    MnnConfig cfg;
+    EngineConfig cfg;
     cfg.model_path = mnn_path.string();
     cfg.backend = opt.backend;
     cfg.precision = opt.precision;
@@ -579,9 +615,11 @@ int main(int argc, char** argv) {
     cfg.box_from_metadata = libreyolo && (family.rfind("rtmdet", 0) == 0 || family.rfind("yolo9", 0) == 0);
     cfg.in_name = opt.in_name;
     cfg.out_name = opt.out_name;
-    MnnInfo info;
+    cfg.ep_lib = opt.ep_lib;
+    cfg.ep_options = opt.ep_options;
+    DetectorInfo info;
     std::string error;
-    std::unique_ptr<MnnDetector> detector = MnnDetector::create(cfg, info, error);
+    std::unique_ptr<RegionDetector> detector = RegionDetector::create(cfg, info, error);
     if (!detector) {
         std::cerr << "Failed to set up " << mnn_path.string() << ": " << error << "\n";
         return 1;
@@ -625,7 +663,7 @@ int main(int argc, char** argv) {
               << info.in_name << " -> " << info.out_name << ", input " << size << "x" << size << ", "
               << info.n_anchor << " anchors x " << (info.n_feat - 4) << " classes, boxes "
               << (info.xyxy ? "xyxy" : "cxcywh") << " (" << info.box_source << ")\n"
-              << "Backend: " << info.backend << " | batch " << info.batch
+              << "Backend: " << engine_name() << ", " << info.backend << " | batch " << info.batch
               << (info.batch < opt.batch ? " (the model has a fixed batch size)" : "") << " | precision "
               << opt.precision << " | preprocessing " << prep << " (" << prep_source << "), pad " << pad << " ("
               << pad_source << ")\n"
