@@ -2,7 +2,7 @@
 
 C++ inference for [RTMDet](https://github.com/open-mmlab/mmdetection/tree/main/configs/rtmdet) object detection on
 large images with **SAHI** (Slicing Aided Hyper Inference), running on
-[MNN](https://github.com/alibaba/MNN) with a **CUDA**, **Vulkan** or CPU backend.
+[MNN](https://github.com/alibaba/MNN) with a **CUDA** or **Vulkan** backend (chosen at build time), or on the CPU.
 
 You only need the model's **.onnx** file (e.g. exported with [LibreYOLO](https://github.com/LibreYOLO/libreyolo)).
 On first use it is converted to MNN's format (`model.mnn`, next to the `.onnx`) by MNN's own converter, which is
@@ -42,9 +42,21 @@ git clone --recursive https://github.com/detu/RTMDet-SAHI.git
 cd RTMDet-SAHI
 # (already cloned without --recursive?  git submodule update --init)
 
-cmake -B build                      # CUDA + Vulkan + CPU (Release by default)
+# CUDA (+ CPU), the default
+cmake -B build
 cmake --build build -j 2
+
+# or Vulkan (+ CPU)
+cmake -B build-vulkan -DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON
+cmake --build build-vulkan -j 2
+
+# or CPU only
+cmake -B build-cpu -DRTMDET_CUDA=OFF
 ```
+
+Only **one** GPU backend can be built: `RTMDET_CUDA` and `RTMDET_VULKAN` cannot both be `ON` (CMake stops with an
+error). The CPU backend is always included, so `--backend cpu` works in every build. Use a separate build directory
+per backend. Builds are Release by default.
 
 The MNN submodule (pinned at 3.6.2) is configured and built automatically, including `MNNConvert`. The first build
 takes a while; on machines with little RAM keep `-j` low (`-j 2`) — an out-of-memory kill shows up as
@@ -54,8 +66,8 @@ Options:
 
 | CMake option | Default | Meaning |
 |---|---|---|
-| `RTMDET_CUDA` | `ON` | Build MNN's CUDA backend (`-DRTMDET_CUDA=OFF` if you have no NVIDIA GPU / toolkit) |
-| `RTMDET_VULKAN` | `ON` | Build MNN's Vulkan backend |
+| `RTMDET_CUDA` | `ON` | Build MNN's CUDA backend |
+| `RTMDET_VULKAN` | `OFF` | Build MNN's Vulkan backend |
 | `RTMDET_CUDA_ARCH` | *(detect)* | GPU compute capability to compile for, e.g. `8.9` (RTX 40xx / RTX Ada laptop GPUs), `8.6` (RTX 30xx), `12.0` (RTX 50xx) |
 | `RTMDET_CUDA_NATIVE_ARCH` | `ON` | Compile the CUDA kernels only for that one GPU (much faster build) |
 | `RTMDET_NVCC` | *(search)* | Path to `nvcc` |
@@ -83,8 +95,8 @@ cmake --build build -j 2
 # A folder (recursively) -> out/<name>_det.jpg, plus all detections as CSV
 ./build/rtmdet_sahi rtmdet_s.onnx images/ -r -o out --csv detections.csv
 
-# Vulkan, whole image as an extra region, own class names
-./build/rtmdet_sahi rtmdet_s.onnx images/ -d vulkan --full -n classes.txt
+# Vulkan build, whole image as an extra region, own class names
+./build-vulkan/rtmdet_sahi rtmdet_s.onnx images/ --full -n classes.txt
 ```
 
 The model is loaded once and every image is processed with it. Output boxes are drawn with a label (class name and
@@ -96,7 +108,7 @@ score) on a green background.
 | `--csv <file>` | | Write all detections (`image,class_id,class_name,score,x1,y1,x2,y2`) |
 | `-n, --names <file>` | model metadata | Class names, one per line: line 1 = class 0, line 2 = class 1, … |
 | `-r, --recursive` | | Scan directories recursively |
-| `-d, --backend` | `auto` | `cuda`, `vulkan`, `cpu`; `auto` = first available in that order |
+| `-d, --backend` | `auto` | `cuda` or `vulkan` (whichever was built), or `cpu`; `auto` = the GPU backend if it works here, else CPU |
 | `--precision` | `normal` | `normal`, `high`, or `low` (fp16 where the backend supports it) |
 | `-b, --batch` | `8` | Regions per inference run (models exported with a fixed batch fall back to 1) |
 | `-t, --threads` | all cores | CPU backend threads and pre/post-processing threads |
@@ -130,8 +142,8 @@ automatically; it is also used when you pass a `.mnn` and the `.onnx` of the sam
 
 ## Troubleshooting
 
-- **`nvcc not found`** – install the CUDA toolkit or pass `-DRTMDET_NVCC=/usr/local/cuda/bin/nvcc`; or build without
-  CUDA: `-DRTMDET_CUDA=OFF`.
+- **`nvcc not found`** – install the CUDA toolkit or pass `-DRTMDET_NVCC=/usr/local/cuda/bin/nvcc`; or build the
+  Vulkan backend instead: `-DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON`.
 - **`nvcc fatal: Unsupported gpu architecture 'compute_60'`** (CUDA 13) – GPU detection failed during configure and
   MNN fell back to a list with old GPUs. Pass your GPU's architecture: `-DRTMDET_CUDA_ARCH=8.9`.
 - **`Warning: cuda backend not available here; MNN uses CPU`** – the CUDA driver/GPU is not visible (check

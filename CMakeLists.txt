@@ -9,10 +9,16 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# MNN backends compiled in (the CPU backend is always there). The backend is
-# picked at run time with --backend (default: CUDA, then Vulkan, then CPU).
+# GPU backend: CUDA or Vulkan -- one of them, not both (the CPU backend is
+# always built). Default CUDA; for Vulkan: -DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON.
 option(RTMDET_CUDA "Build MNN's CUDA backend (needs the CUDA toolkit / nvcc)" ON)
-option(RTMDET_VULKAN "Build MNN's Vulkan backend (needs only the Vulkan loader at run time)" ON)
+option(RTMDET_VULKAN "Build MNN's Vulkan backend (needs only the Vulkan loader at run time)" OFF)
+if(RTMDET_CUDA AND RTMDET_VULKAN)
+    message(FATAL_ERROR "RTMDET_CUDA and RTMDET_VULKAN cannot both be ON; choose one:\n"
+                        "  CUDA:   -DRTMDET_CUDA=ON  -DRTMDET_VULKAN=OFF\n"
+                        "  Vulkan: -DRTMDET_CUDA=OFF -DRTMDET_VULKAN=ON\n"
+                        "(use a separate build directory for each)")
+endif()
 option(RTMDET_CUDA_NATIVE_ARCH "Compile MNN's CUDA kernels only for the GPU in this machine" ON)
 # GPU architecture for the CUDA kernels, e.g. 8.9 (RTX 40xx / RTX Ada), 8.6 (RTX 30xx), 12.0 (RTX 50xx).
 # Empty = detect the GPU in this machine while configuring.
@@ -93,4 +99,11 @@ target_compile_definitions(rtmdet_sahi PRIVATE
 # Find libMNN.so at run time without LD_LIBRARY_PATH
 set_target_properties(rtmdet_sahi PROPERTIES BUILD_RPATH "${MNN_BUILD_DIR}")
 
-message(STATUS "rtmdet_sahi: MNN backends: CPU | CUDA ${RTMDET_CUDA} | Vulkan ${RTMDET_VULKAN} | ${CMAKE_BUILD_TYPE}")
+if(RTMDET_CUDA)
+    set(_gpu "CUDA")
+elseif(RTMDET_VULKAN)
+    set(_gpu "Vulkan")
+else()
+    set(_gpu "no GPU")
+endif()
+message(STATUS "rtmdet_sahi: MNN backends: ${_gpu} + CPU | ${CMAKE_BUILD_TYPE}")
