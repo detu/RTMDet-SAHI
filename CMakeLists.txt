@@ -78,6 +78,12 @@ if(RTMDET_CUDA)
             endif()
         endif()
     endif()
+    # MNN's bundled CUTLASS v2.9 has a typo (set_slice3x3) in templates nobody
+    # instantiates; GCC 14+ rejects such template bodies (-Wtemplate-body).
+    # Older GCC ignores this -Wno-... flag.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        list(APPEND _mnn_args "-DCUDA_NVCC_FLAGS=-Xcompiler=-Wno-template-body")
+    endif()
     if(_cuda_arch)
         list(APPEND _mnn_args "-DCUDA_ARCHS=${_cuda_arch}")
     else()
