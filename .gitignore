@@ -1,0 +1,7 @@
+build/
+build-*/
+*.mnn
+*.convert.log
+output/
+output.jpg
+*.csv
